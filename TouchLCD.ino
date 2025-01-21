@@ -11,10 +11,19 @@ TFT_eSPI tft = TFT_eSPI();
 
 #include <HTTPClient.h>
 
-const char WIFI_SSID[] = "WIFI TANG 4";     // Change this to your WiFi SSID
-const char WIFI_PASSWORD[] = "wifitang4@";  // Change this to your WiFi password
+const char WIFI_SSID[] = "Yang KAFE 2";        // Change this to your WiFi SSID
+const char WIFI_PASSWORD[] = "camonquyh";  // Change this to your WiFi password
 
 
+const char MQTT_BROKER[] = "broker.emqx.io";  // CHANGE TO MQTT BROKER'S ADDRESS
+const int MQTT_PORT = 1883;
+const char CLIENT_ID[] = "LED_LCD";  // CHANGE IT AS YOU DESIRE
+const char MQTT_USERNAME[] = "";     // CHANGE IT IF REQUIRED, empty if not required
+const char MQTT_PASSWORD[] = "";     // CHANGE IT IF REQUIRED, empty if not required
+
+// The MQTT topics that ESP32 should publish/subscribe
+const char PUBLISH_TOPIC[] = "lcd_test/TOPICPUB";    // CHANGE IT AS YOU DESIRE
+const char SUBSCRIBE_TOPIC[] = "lcd_test/TOPICSUB";  // CHANGE IT AS YOU DESIRE
 
 const int PUBLISH_INTERVAL = 5000;  // 5 seconds
 // Đây là tên file dùng để lưu trữ dữ liệu hiệu chuẩn
@@ -35,13 +44,20 @@ int currentFileIndex = 0;     // Vị trí file hiện tại trong danh sách
 uint16_t t_x = 0, t_y = 0;
 uint16_t last_t_x = 0, last_t_y = 0;
 
-
+void downloadImage(const char *url, const char *filePath);
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
   // Khởi tạo màn hình TFT
   tft.begin();
   tft.setRotation(1);
+  // touch_calibrate();
+  // tft.fillScreen(TFT_BLACK);  // Xóa màn hình
+
+  // // Bật các chân CS của TFT, Touch, và SD Card
+  // pinMode(22, OUTPUT);
+  // pinMode(15, OUTPUT);
+  // pinMode(5, OUTPUT);
 
   digitalWrite(22, HIGH);  // Touch controller chip select (if used)
   digitalWrite(15, HIGH);  // TFT screen chip select
@@ -77,21 +93,22 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
+  // Wait for connection with timeout (10 seconds)
+  unsigned long startMillis = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startMillis < 10000) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-  // downloadImage("https://th.bing.com/th/id/OIP.YxGhw3I-iJ0uVuqpSxePaAAAAA?rs=1&pid=ImgDetMain", "/downloaded.jpg");
-  
-
-
-  // // Set all chip selects high to avoid bus contention during initialisation of each peripheral
- 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    connectToMQTT();
+  } else {
+    Serial.println("WiFi connection failed, running without network.");
+  }
 }
 #define SWIPE_THRESHOLD 60  // Ngưỡng vuốt tối thiểu (px)
 #define SWIPE_DELAY 500     // Thời gian tối thiểu giữa các lần vuốt (ms)
@@ -100,7 +117,7 @@ unsigned long lastSwipeTime = 0;  // Lưu thời gian lần vuốt trước
 bool startTouch = false;
 uint16_t startX = 0;
 void loop() {
-  // mqtt.loop();
+
   tft.setRotation(1);
   // Hiển thị ảnh hiện tại (chỉ vẽ lại khi cần)
   static int lastFileIndex = -1;
@@ -111,20 +128,25 @@ void loop() {
     drawSdJpeg(("/" + fileNames[currentFileIndex]).c_str(), 0, 0);
     lastFileIndex = currentFileIndex;
   }
-  
-  
+  if (WiFi.status() == WL_CONNECTED) {
+    mqtt.loop();
+    if (millis() - lastPublishTime > PUBLISH_INTERVAL) {
+      sendToMQTT(fileNames[currentFileIndex].c_str());
+      lastPublishTime = millis();
+    }
+  }
   bool pressed = tft.getTouch(&t_x, &t_y);
   if (pressed) {
-    if (startTouch == false) { 
+    if (startTouch == false) {
       startTouch = true;
       startX = t_x;  // Lưu tọa độ ban đầu khi chạm
     }
 
     if (millis() - lastSwipeTime > 300) {  // Chống nhiễu thao tác vuốt
-      int swipeDistance = t_x - startX; 
+      int swipeDistance = t_x - startX;
 
       if (abs(swipeDistance) > 50) {  // Chỉ xử lý khi vuốt đủ xa
-        if (swipeDistance > 0) { 
+        if (swipeDistance > 0) {
           Serial.println("Vuốt phải -> Next Image");
           currentFileIndex = (currentFileIndex + 1) % fileCount;
         } else {
@@ -137,7 +159,6 @@ void loop() {
   } else {
     startTouch = false;  // Reset khi thả tay
   }
-  
 }
 
 void listImages(File dir) {
@@ -261,31 +282,133 @@ void showTime(uint32_t msTime) {
   Serial.print(msTime);
   Serial.println(F(" ms "));
 }
+void connectToMQTT() {
+  mqtt.begin(MQTT_BROKER, MQTT_PORT, network);
 
+  mqtt.onMessage(messageHandler);
+
+  Serial.print("ESP32 - Connecting to MQTT broker");
+
+  while (!mqtt.connect(CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
+    Serial.print(".");
+    delay(100);
+  }
+  Serial.println();
+
+  if (!mqtt.connected()) {
+    Serial.println("ESP32 - MQTT broker Timeout!");
+    return;
+  }
+  if (mqtt.subscribe(SUBSCRIBE_TOPIC))
+    Serial.print("ESP32 - Subscribed to the topic: ");
+  else
+    Serial.print("ESP32 - Failed to subscribe to the topic: ");
+
+  Serial.println(SUBSCRIBE_TOPIC);
+  Serial.println("ESP32  - MQTT broker Connected!");
+}
+void sendToMQTT(const char *filename) {
+  StaticJsonDocument<200> message;
+  message["timestamp"] = millis();
+  message["data"] = filename;  // Or you can read data from other sensors
+  char messageBuffer[512];
+  serializeJson(message, messageBuffer);
+
+  mqtt.publish(PUBLISH_TOPIC, messageBuffer);
+
+  // Serial.println("ESP32 - sent to MQTT:");
+  // Serial.print("- topic: ");
+  // Serial.println(PUBLISH_TOPIC);
+  // Serial.print("- payload:");
+  // Serial.println(messageBuffer);
+}
+void messageHandler(String &topic, String &payload) {
+  Serial.println("ESP32 - received from MQTT:");
+  Serial.println("- topic: " + topic);
+  Serial.println("- payload:");
+  Serial.println(payload);
+
+  // You can process the incoming data as json object, then control something
+
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.println("Failed to deserialize JSON!");
+    return;
+  }
+
+  const char *setConfig = doc["setConfig"];
+  Serial.printf("config: %s \n", setConfig);
+  if (doc["setConfig"] == "SetUrlDownload") {
+    const char *url = doc["url"];
+    const char *fileName = doc["fileName"];
+
+    // Sử dụng String để tạo đường dẫn file
+    String filePath = "/" + String(fileName);
+
+    Serial.printf("url: %s \n", url);
+    Serial.printf("filePath: %s \n", filePath.c_str());
+    File Image = SD.open(filePath, FILE_READ);
+    if (!Image) {
+      downloadImage(url, filePath.c_str());
+    } else {
+      Serial.println("filename already exists");
+    }
+    // downloadImage(url, fileName);
+  }
+}
 void downloadImage(const char *url, const char *filePath) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, cannot download image.");
+    return;
+  }
+
   HTTPClient http;
   http.begin(url);
 
   int httpCode = http.GET();
-  if (httpCode == HTTP_CODE_OK) {
+  int size = http.getSize();
+
+  if (httpCode == 200) {
     File file = SD.open(filePath, FILE_WRITE);
     if (!file) {
       Serial.println("Failed to open file for writing!");
+      http.end();
       return;
     }
 
     WiFiClient *stream = http.getStreamPtr();
     uint8_t buffer[512];  // Buffer đọc dữ liệu
+    int totalBytes = 0;
     int bytesRead;
 
-    while ((bytesRead = stream->readBytes(buffer, sizeof(buffer))) > 0) {
-      file.write(buffer, bytesRead);
-    }
+    Serial.println("Downloading image...");
+    while (http.connected() && (size > 0 || size == -1)) {
+      size_t streamSize = stream->available();
+      if (streamSize) {
+        int c = stream->readBytes(buffer, ((size > sizeof(buffer)) ? sizeof(buffer) : size));
+        file.write(buffer, c);  // Ghi dữ liệu vào thẻ SD
 
+        if (size > 0) {
+          size -= c;
+          totalBytes += c;
+        }
+      }
+      delay(1);
+    }
     file.close();
-    Serial.println("Download complete!");
-    delay(2000);
-    ESP.restart();
+
+
+    if (totalBytes > 0) {
+      Serial.println("Download complete! File saved.");
+      delay(2000);
+      ESP.restart();
+    } else {
+      Serial.println("Download failed: No data received.");
+      Serial.printf("Deleting file: %s\n", filePath);
+      SD.remove(filePath);
+    }
   } else {
     Serial.printf("HTTP request failed, error: %d\n", httpCode);
   }
@@ -293,8 +416,7 @@ void downloadImage(const char *url, const char *filePath) {
   http.end();
 }
 
-void touch_calibrate()
-{
+void touch_calibrate() {
   uint16_t calData[5];
   uint8_t calDataOK = 0;
 
@@ -307,13 +429,10 @@ void touch_calibrate()
 
   // check if calibration file exists and size is correct
   if (SPIFFS.exists(CALIBRATION_FILE)) {
-    if (REPEAT_CAL)
-    {
+    if (REPEAT_CAL) {
       // Delete if we want to re-calibrate
       SPIFFS.remove(CALIBRATION_FILE);
-    }
-    else
-    {
+    } else {
       File f = SPIFFS.open(CALIBRATION_FILE, "r");
       if (f) {
         if (f.readBytes((char *)calData, 14) == 14)
